@@ -11,12 +11,16 @@ from typing import Any
 
 class AwsSecurityPostureScanner:
     def __init__(self, session: Any, region: str):
+        # Clients are created once per scanner instance so each check can reuse
+        # the same authenticated session and avoid repeated setup overhead.
         self.region = region
         self.s3 = session.client("s3")
         self.iam = session.client("iam")
         self.ec2 = session.client("ec2", region_name=region)
 
     def scan(self) -> dict[str, Any]:
+        # Every check returns a homogeneous list of findings, so we can combine
+        # them directly and compute a single summary count for the final report.
         findings = (
             self.check_public_s3_buckets()
             + self.check_iam_users_without_mfa()
@@ -38,6 +42,8 @@ class AwsSecurityPostureScanner:
         findings: list[dict[str, str]] = []
         for bucket in self.s3.list_buckets().get("Buckets", []):
             name = bucket["Name"]
+            # Bucket policy status is the simplest API signal for whether the
+            # bucket is effectively public from a policy perspective.
             status = self.s3.get_bucket_policy_status(Bucket=name)
             if status.get("PolicyStatus", {}).get("IsPublic"):
                 findings.append(
@@ -51,6 +57,8 @@ class AwsSecurityPostureScanner:
 
     def check_iam_users_without_mfa(self) -> list[dict[str, str]]:
         findings: list[dict[str, str]] = []
+        # IAM list operations are paginated, so iterate page-by-page to support
+        # accounts with large user counts.
         for page in self.iam.get_paginator("list_users").paginate():
             for user in page.get("Users", []):
                 username = user["UserName"]
@@ -71,6 +79,7 @@ class AwsSecurityPostureScanner:
             for sg in page.get("SecurityGroups", []):
                 group_id = sg.get("GroupId", "unknown")
                 for perm in sg.get("IpPermissions", []):
+                    # Flag any IPv4 ingress rule open to the whole internet.
                     if any(ip.get("CidrIp") == "0.0.0.0/0" for ip in perm.get("IpRanges", [])):
                         findings.append(
                             {
@@ -97,6 +106,8 @@ class AwsSecurityPostureScanner:
 
 
 def format_human_report(report: dict[str, Any]) -> str:
+    # Keep the text output concise so it remains terminal-friendly and can be
+    # attached to tickets/chat messages without additional formatting.
     lines = [
         "AWS Security Baseline Scanner Report",
         "=" * 36,
@@ -130,6 +141,8 @@ def main() -> None:
 
     import boto3
 
+    # Respect optional named profile while still supporting the default
+    # credential provider chain when --profile is not supplied.
     session = boto3.Session(profile_name=args.profile) if args.profile else boto3.Session()
     report = AwsSecurityPostureScanner(session=session, region=args.region).scan()
 
